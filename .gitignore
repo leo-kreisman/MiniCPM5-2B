@@ -1,0 +1,7 @@
+# Assembled weights come from ./assemble.sh and are never committed.
+# GitHub caps files at 2 GiB anyway, which is why they ship as release parts.
+/bf16/*.safetensors
+/mlx-4bit/*.safetensors
+/mlx-8bit/*.safetensors
+/gguf/*.gguf
+/.parts/

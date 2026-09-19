@@ -1,0 +1,284 @@
+# Running MiniCPM5-2B on macOS
+
+Everything below is assembled from the official documentation vendored in
+[`vendor/`](vendor/) — see [`VENDORED-FROM.md`](VENDORED-FROM.md) for the exact
+commit and sha256 of each source. Where this guide summarises an official
+document, the vendored file wins. Where this guide adds something the official
+documents do not contain (the memory arithmetic in §1, the OMP wiring in §2 and
+§3), it is marked as ours.
+
+> **Read §1 before you download anything.** MiniCPM5-2B has **42 layers of full
+> attention and no hybrid/linear layers**, so its KV cache is unusually large for
+> a 2.5B model: 43,008 bytes per token. Which build you can use depends on the
+> context length you want, not on which build is "best".
+
+---
+
+## The four builds
+
+| Build | Bytes | Publisher | Runtime | SemIf pin? |
+| --- | ---: | --- | --- | --- |
+| bf16 | 5,033,557,096 | `openbmb` (official) | Torch / CPU | **yes** — the desktop reference |
+| MLX 4-bit | 1,416,035,216 | `openbmb` (official) | MLX | no |
+| MLX 8-bit | 2,674,327,290 | `mlx-community` | MLX | no |
+| GGUF Q4_K_M | 1,561,318,368 | `openbmb` (official) | llama.cpp | **yes** — browser/wllama pin |
+
+Three of the four are official OpenBMB builds. Only the 8-bit MLX build is
+community. All four are the same weights in different containers — they do not
+share files and no runtime can read another's.
+
+Get them with `./assemble.sh` (see §4). The bf16 and MLX 8-bit builds are over
+GitHub's 2 GiB per-file cap and ship as byte-range parts; the other two ship whole.
+
+---
+
+## §1 — The 9 GB budget
+
+MiniCPM5-2B is `LlamaForCausalLM`, `model_type: llama`, 42 layers, 16 query
+heads and **2 KV heads** at head_dim 128. Because *every* layer is full
+attention, the cache cost is:
+
+```
+42 layers x 2 (K and V) x 2 kv_heads x 128 head_dim x 2 bytes (fp16) = 43,008 B/token
+```
+
+| Context | KV cache alone |
+| ---: | ---: |
+| 8 K | 352 MB |
+| 32 K | 1.41 GB |
+| 64 K | 2.82 GB |
+| 128 K (max) | **5.64 GB** |
+
+Weights plus KV, against 9 GB:
+
+| Build | Weights | @ 32 K | @ 64 K | @ 128 K |
+| --- | ---: | ---: | ---: | ---: |
+| MLX 4-bit | 1.42 GB | **2.83 GB** | 4.24 GB | **7.06 GB** |
+| GGUF Q4_K_M | 1.56 GB | 2.97 GB | 4.38 GB | 7.20 GB |
+| MLX 8-bit | 2.67 GB | 4.08 GB | 5.49 GB | 8.31 GB |
+| bf16 | 5.03 GB | 6.44 GB | 7.85 GB | **10.67 GB — does not fit** |
+
+Allow roughly 0.6 GB for the Python runtime, MLX's allocator cache, and macOS
+overhead on top of these. That puts the practical line at:
+
+- **4-bit at 128 K is the only build with real headroom.** ~7.7 GB of 9 GB.
+- **8-bit at 128 K is marginal** — ~8.9 GB of 9 GB. Expect pressure.
+- **bf16 fits only below ~64 K**, and then with almost nothing left over.
+- At 32 K, every build fits. The choice only matters if you want long context.
+
+Two levers, and they are different on each runtime:
+
+- **MLX** — `--max-kv-size n` uses a rotating KV cache. It bounds memory but
+  discards older context, so quality degrades for long prompts. There is no KV
+  quantization in MLX. (`vendor/MLX-LM-README.md`, "Long Prompts and Generations")
+- **llama.cpp** — quantize the cache itself, which keeps the whole context at
+  half or quarter precision. Confirm the exact flag on your build with
+  `llama-server --help | grep cache-type` before relying on it; it is not in the
+  vendored llama.cpp docs.
+
+**Decode speed tracks weight size** — it is bandwidth-bound. Relative to 4-bit,
+8-bit is roughly **1.9x slower** and bf16 roughly **3.5x slower**. This matters
+for chat and not at all for SemIf, which never decodes (§3).
+
+---
+
+## §2 — Route A: chat, via MLX
+
+The shortest path to a chat endpoint. No compiler, no GGUF conversion.
+
+```bash
+python3 -m venv ~/.venvs/minicpm && source ~/.venvs/minicpm/bin/activate
+pip install mlx-lm
+```
+
+`mlx_lm.server` is the OpenAI-compatible server (`vendor/MLX-LM-README.md`).
+Point it at the assembled 4-bit build:
+
+```bash
+mlx_lm.server --model ./mlx-4bit --port 8080
+```
+
+For long context, bound the cache rather than letting it grow to 128 K:
+
+```bash
+mlx_lm.server --model ./mlx-4bit --port 8080 \
+  --max-kv-size 32768 \
+  --prefill-step-size 1024
+```
+
+`--prefill-step-size` lowers *peak* memory while reading a long prompt, at some
+cost in prefill speed. The default is 2048.
+
+### Wiring it into OMP
+
+OMP is a coding agent, not an inference runtime — it talks to a server over
+OpenAI-compatible HTTP. Its config is `~/.omp/agent/models.yml` (it falls back to
+`.yaml`), and the root object contains **only** `providers`
+(`vendor/OMP-MODELS.md`).
+
+OMP has *implicit* discovery for `ollama`, `lm-studio`, `llama.cpp` and `vllm`.
+There is **no implicit provider for MLX**, so an MLX server needs an explicit
+provider with the model listed by hand:
+
+```yaml
+providers:
+  minicpm-mlx:
+    baseUrl: http://127.0.0.1:8080/v1
+    api: openai-completions
+    auth: none
+    models:
+      - id: /absolute/path/to/mlx-4bit
+        name: MiniCPM5-2B MLX 4-bit
+        contextWindow: 131072
+        maxTokens: 8192
+```
+
+The `id` must match what the server reports at `GET /v1/models` — `mlx_lm.server`
+uses the model path as the id, so read it back rather than guessing:
+
+```bash
+curl -s http://127.0.0.1:8080/v1/models
+```
+
+---
+
+## §3 — Route B: chat, via llama.cpp and GGUF
+
+No Python, no virtualenv. The GGUF carries its own tokenizer and chat template.
+
+```bash
+brew install llama.cpp          # vendor/LLAMA-CPP-INSTALL.md
+llama-server -m ./gguf/MiniCPM5-2B-Q4_K_M.gguf \
+  --port 8080 -ngl 99 -c 32768
+```
+
+`-ngl 99` offloads every layer to Metal. `-c` sets the context; this is the knob
+that controls the KV cache in §1. Lower it and the cache shrinks linearly.
+
+### Wiring it into OMP
+
+`llama.cpp` **does** have implicit discovery, so if the server is on the default
+port you may need no config at all — OMP looks at `LLAMA_CPP_BASE_URL` then
+`http://127.0.0.1:8080`. To be explicit, this is the schema from the official
+doc:
+
+```yaml
+providers:
+  llama.cpp:
+    baseUrl: http://127.0.0.1:8080
+    api: openai-responses
+    auth: none
+    discovery:
+      type: llama.cpp
+```
+
+Note the official example pairs llama.cpp with `api: openai-responses`, not
+`openai-completions` — that is upstream's choice, not a typo here. If your client
+wants `/v1/chat/completions` specifically, declare a custom provider with
+`api: openai-completions` and an explicit `models:` list as in §2.
+
+---
+
+## §4 — Route C: SemIf (scoring, not chat)
+
+SemIf is not a chat runtime. It runs **one forward pass** and reads the logits at
+a fixed answer token. It never decodes. It is not an alternative to §2 and §3 —
+it answers a different question.
+
+### Install
+
+```bash
+git clone https://github.com/TheoLeeCJ/SemIf && cd SemIf
+pip install -e '.[test,mlx]'
+```
+
+SemIf requires **MLX-LM at commit `a63e24c389382619eb6d9af656e3b46024be217a`**
+(package 0.32.0), with MLX pinned to 0.32.2. The released **0.31.3 is not
+acceptable** — it applies the L2 epsilon incorrectly
+(`vendor/SEMIF-MLX.md`). Install from the commit, not from PyPI:
+
+```bash
+pip install "mlx-lm @ git+https://github.com/ml-explore/mlx-lm@a63e24c389382619eb6d9af656e3b46024be217a"
+```
+
+### ⚠️ The MLX backend refuses MiniCPM5-2B
+
+This is the finding that decides the whole SemIf question on this machine.
+`src/semif_phase1/mlx_backend.py` gates the model at load:
+
+```python
+if config.get("model_file") or config.get("model_type") not in {"qwen3_5"}:
+    raise ValueError("MLX backend supports native Qwen3.5 text scoring only; "
+                     "custom model code is not allowed")
+```
+
+MiniCPM5-2B's config says `model_type: llama` and
+`architectures: ["LlamaForCausalLM"]`. **It fails this check and raises before a
+single weight is read.** This is a hard, deterministic refusal, not a warning.
+
+Scope this precisely, because the opposite conclusion is easy and wrong:
+
+- It is **not** "SemIf cannot run MiniCPM5-2B." SemIf pins MiniCPM5-2B twice —
+  bf16 as the desktop reference and GGUF Q4_K_M for its browser ladder
+  (`vendor/SEMIF-MODELS.json`).
+- It is **not** "MLX cannot run MiniCPM5-2B." MLX runs it fine — that is §2.
+- It is exactly this: **SemIf's *MLX backend* serves only `qwen3_5`.** The
+  restriction is on that one entry point.
+
+### What follows from that
+
+Every MLX result SemIf publishes — including the bf16/q4/q8 precision sweep and
+the `--mlx-bits` in-memory quantization this repo's earlier notes carried — was
+produced on **`Qwen/Qwen3.5-4B`**, not on MiniCPM5-2B. Those numbers do not
+transfer to this model, and `--mlx-bits 8` is not a MiniCPM5-2B option.
+
+So on a Mac there is no fast SemIf path for MiniCPM5-2B. The MLX backend refuses
+it, and the Torch backend — which is the default and does support it — runs on
+CPU here, because SemIf's Torch path targets CUDA. It will work and it will be
+slow. If your goal is SemIf *specifically*, the model it is built and benchmarked
+around on Apple Silicon is **Qwen3.5-4B**; use MiniCPM5-2B with SemIf only if you
+want the bf16 reference numbers and can afford the wait.
+
+The `--mlx-cache-limit-mib` flag (default 256 MiB, and it bounds the MLX
+*allocator* cache, not the KV cache) is a real and useful lever — it just applies
+to the Qwen3.5-4B runs, not to this model.
+
+---
+
+## §5 — Traps
+
+Each of these is a wrong conclusion this setup reliably produces.
+
+1. **"8-bit is the best quality, so use it."** At 128 K, 8-bit needs ~8.9 GB of
+   your 9 GB. Quality is not the only axis — see §1.
+2. **"SemIf's MLX backend supports this model."** It does not; §4. Reading
+   SemIf's MLX docs without reading the gate in `mlx_backend.py` produces this.
+3. **"SemIf can't use MiniCPM5-2B at all."** Also wrong. Scope the refusal to the
+   MLX entry point. It is pinned for the Torch path and the browser path.
+4. **"The MLX 8-bit build is the SemIf 8-bit build."** SemIf quantizes in memory
+   from the bf16 pin. A separate 8-bit artifact is a chat-path convenience, not a
+   SemIf input.
+5. **"Any of these containers can read another's files."** They cannot. Each
+   variant directory needs its own `config.json` and tokenizer alongside the
+   reassembled weights.
+6. **"`mlx_lm.server` needs a `/v1` in `--model`."** It does not, and OMP's
+   `baseUrl` does. Those are two different places.
+
+---
+
+## §6 — What came from where
+
+| Claim in this guide | Source |
+| --- | --- |
+| MLX-LM install, `--max-kv-size`, `--prefill-step-size`, `mlx_lm.server` | `vendor/MLX-LM-README.md` |
+| SemIf install, MLX-LM commit pin, 0.31.3 L2-epsilon bug, `--mlx-bits`, cache cap | `vendor/SEMIF-MLX.md` |
+| The `model_type not in {"qwen3_5"}` refusal | SemIf `src/semif_phase1/mlx_backend.py` @ `ca3ba65` |
+| Which revisions SemIf pins | `vendor/SEMIF-MODELS.json` |
+| OMP `providers` schema, local discovery, llama.cpp/ollama examples | `vendor/OMP-MODELS.md` |
+| `brew install llama.cpp` | `vendor/LLAMA-CPP-INSTALL.md` |
+| Build instructions, if you ever need to compile llama.cpp | `vendor/LLAMA-CPP-BUILD.md` |
+| KV bytes/token, residency tables, OMP MLX wiring, traps | **ours** — derived from the pinned `config.json`, not from an upstream doc |
+
+The KV arithmetic is ours because no upstream document states it for this model.
+Check it against the `config.json` in each variant directory: 42 layers, 2 KV
+heads, head_dim 128. If those numbers move, §1 moves with them.

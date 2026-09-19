@@ -1,0 +1,162 @@
+{
+  "openbmb/MiniCPM5-2B": {
+    "revision": "12a3808a956f869c767195e9266b59c4d21d92e2",
+    "files": [
+      {
+        "path": "README-cn.md",
+        "size": 110251,
+        "sha256": null
+      },
+      {
+        "path": "README.md",
+        "size": 112204,
+        "sha256": null
+      },
+      {
+        "path": "chat_template.jinja",
+        "size": 9060,
+        "sha256": null
+      },
+      {
+        "path": "config.json",
+        "size": 704,
+        "sha256": null
+      },
+      {
+        "path": "generation_config.json",
+        "size": 213,
+        "sha256": null
+      },
+      {
+        "path": "model-00000-of-00001.safetensors",
+        "size": 5033557096,
+        "sha256": "14fb8e7f0a18d53d1f239773758bf581cee7e456a4523a54622c3a245b64402c"
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "size": 31378,
+        "sha256": null
+      },
+      {
+        "path": "special_tokens_map.json",
+        "size": 551,
+        "sha256": null
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 9894271,
+        "sha256": null
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size": 94391,
+        "sha256": null
+      }
+    ]
+  },
+  "openbmb/MiniCPM5-2B-GGUF": {
+    "revision": "2079a22f3beaa4e306449978533478fe0522f4b3",
+    "files": [
+      {
+        "path": "MiniCPM5-2B-Q4_K_M.gguf",
+        "size": 1561318368,
+        "sha256": "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd"
+      }
+    ]
+  },
+  "openbmb/MiniCPM5-2B-MLX": {
+    "revision": "8a9ad7539ac86281d0ac2b017ba04a5de53fe9a3",
+    "files": [
+      {
+        "path": "README-cn.md",
+        "size": 110408,
+        "sha256": null
+      },
+      {
+        "path": "README.md",
+        "size": 112379,
+        "sha256": null
+      },
+      {
+        "path": "chat_template.jinja",
+        "size": 9060,
+        "sha256": null
+      },
+      {
+        "path": "config.json",
+        "size": 886,
+        "sha256": null
+      },
+      {
+        "path": "generation_config.json",
+        "size": 213,
+        "sha256": null
+      },
+      {
+        "path": "model.safetensors",
+        "size": 1416035216,
+        "sha256": "c207798696a4a454e7ac211b25227625466c693335941cee8904fb922f295cc1"
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "size": 68721,
+        "sha256": null
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 9894271,
+        "sha256": null
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size": 435,
+        "sha256": null
+      }
+    ]
+  },
+  "mlx-community/MiniCPM5-2B-8bit": {
+    "revision": "2d20e8e672ce892d50f7265bfd3fc9b59b718f2a",
+    "files": [
+      {
+        "path": "README.md",
+        "size": 1202,
+        "sha256": null
+      },
+      {
+        "path": "chat_template.jinja",
+        "size": 9060,
+        "sha256": null
+      },
+      {
+        "path": "config.json",
+        "size": 886,
+        "sha256": null
+      },
+      {
+        "path": "generation_config.json",
+        "size": 213,
+        "sha256": null
+      },
+      {
+        "path": "model.safetensors",
+        "size": 2674327290,
+        "sha256": "82db8e423c5df99a5989f1b73dad1f44941a7800b308915f6ae7142966b32e40"
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "size": 68721,
+        "sha256": null
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 9894271,
+        "sha256": null
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size": 435,
+        "sha256": null
+      }
+    ]
+  }
+}
