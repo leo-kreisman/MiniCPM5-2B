@@ -372,6 +372,25 @@ Each of these is a wrong conclusion this setup reliably produces.
 8. **"I ran `mkdir ~/.cache/huggingface/hub` and `/v1/models` still 500s."** It
    reads `HF_HUB_CACHE`, which follows `HF_HOME`. If `HF_HOME` is exported, that
    mkdir is a no-op. Create the path the library actually reports — §2.
+9. **"llama.cpp is faster than MLX."** Maybe — but compare like with like first,
+   because the obvious comparison is confounded. Decode is **bandwidth-bound**
+   (§1), and the three builds are not the same size:
+
+   | Build | Bytes |
+   | --- | ---: |
+   | MLX 4-bit | 1,416,035,216 |
+   | GGUF Q4_K_M | 1,561,318,368 |
+   | MLX 8-bit | 2,674,327,290 |
+
+   A speedup measured against **MLX 8-bit** is mostly the **1.71x** larger weight
+   stream, not the runtime. Note MLX 4-bit is the *smallest* file of the three —
+   so if llama.cpp still wins the 4-bit comparison, the cause is elsewhere. The
+   real runtime difference is the **KV cache**: llama.cpp can quantize it
+   (`--cache-type-k` / `--cache-type-v`; confirm on your build with
+   `llama-server --help | grep cache-type`) and **MLX has no KV quantization at
+   all** (§1). At 128 K that is 5.64 GB of cache at fp16 — so llama.cpp's
+   advantage should **grow with context length** and be smallest at short
+   context. If you see the opposite, something else is going on.
 
 ---
 
