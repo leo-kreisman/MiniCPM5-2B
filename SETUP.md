@@ -14,18 +14,37 @@ documents do not contain (the memory arithmetic in §1, the OMP wiring in §2 an
 
 ---
 
-## The four builds
+## The builds
 
-| Build | Bytes | Publisher | Runtime | SemIf pin? |
-| --- | ---: | --- | --- | --- |
-| bf16 | 5,033,557,096 | `openbmb` (official) | Torch / CPU | **yes** — the desktop reference |
-| MLX 4-bit | 1,416,035,216 | `openbmb` (official) | MLX | no |
-| MLX 8-bit | 2,674,327,290 | `mlx-community` | MLX | no |
-| GGUF Q4_K_M | 1,561,318,368 | `openbmb` (official) | llama.cpp | **yes** — browser/wllama pin |
+| Build | Bytes | ~bpw | Publisher | Runtime | Mirrored? | SemIf pin? |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| bf16 | 5,033,557,096 | 16.00 | `openbmb` (official) | Torch / CPU | yes | **yes** — desktop reference |
+| GGUF F16 | 5,039,006,688 | 16.02 | `openbmb` (official) | llama.cpp | **no** | no |
+| MLX 4-bit | 1,416,035,216 | 4.50 | `openbmb` (official) | MLX | yes | no |
+| GGUF Q4_K_M | 1,561,318,368 | 4.96 | `openbmb` (official) | llama.cpp | yes | **yes** — wllama pin |
+| MLX 8-bit | 2,674,327,290 | 8.50 | `mlx-community` | MLX | yes | no |
+| GGUF Q8_0 | 2,679,710,688 | 8.52 | `openbmb` (official) | llama.cpp | **no** | no |
 
-Three of the four are official OpenBMB builds. Only the 8-bit MLX build is
-community. All four are the same weights in different containers — they do not
-share files and no runtime can read another's.
+Bytes/param is computed against **2,516,778,548 params** (bf16 ÷ 2), so it is the
+real precision of each container, not its label. Note `Q4_K_M` is ~4.96 bpw, not
+4.0 — a k-quant mixes bit widths across tensors. "4-bit" and "8-bit" are labels;
+the bpw column is the fact.
+
+All are official OpenBMB builds except the MLX 8-bit one, which is community. They
+are the same weights in different containers — they do not share files and no
+runtime can read another's.
+
+**The mirror ships four of the six.** `GGUF Q8_0` and `GGUF F16` are published
+upstream in [`openbmb/MiniCPM5-2B-GGUF`](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF)
+and are **not** in `weights-v1` — download them straight from Hugging Face if you
+want them. Other quantizations (Q5_K_M, Q6_K, IQ4_XS …) exist in community repos
+such as `bartowski/MiniCPM5-2B-GGUF`.
+
+**`GGUF Q8_0` is the one to notice.** It costs 1.12 GB over Q4_K_M and buys
+~8.52 bpw — and unlike the MLX 8-bit build, which is the *same precision at the
+same size*, it runs on `llama-server` and therefore **keeps the tool loop**
+(§2 fault 1). It is not true that 8-bit and tool calling are mutually exclusive
+on this model. See §1 for what it costs against the 9 GB budget.
 
 Get them with `./assemble.sh` (see §4). The bf16 and MLX 8-bit builds are over
 GitHub's 2 GiB per-file cap and ship as byte-range parts; the other two ship whole.
@@ -56,15 +75,20 @@ Weights plus KV, against 9 GB:
 | MLX 4-bit | 1.42 GB | **2.83 GB** | 4.24 GB | **7.06 GB** |
 | GGUF Q4_K_M | 1.56 GB | 2.97 GB | 4.38 GB | 7.20 GB |
 | MLX 8-bit | 2.67 GB | 4.08 GB | 5.49 GB | 8.31 GB |
+| GGUF Q8_0 | 2.68 GB | 4.09 GB | 5.50 GB | 8.32 GB |
 | bf16 | 5.03 GB | 6.44 GB | 7.85 GB | **10.67 GB — does not fit** |
 
 Allow roughly 0.6 GB for the Python runtime, MLX's allocator cache, and macOS
 overhead on top of these. That puts the practical line at:
 
 - **4-bit at 128 K is the only build with real headroom.** ~7.7 GB of 9 GB.
-- **8-bit at 128 K is marginal** — ~8.9 GB of 9 GB. Expect pressure.
+- **8-bit at 128 K is marginal** — ~8.9 GB of 9 GB, and this is true of **both**
+  8-bit builds: MLX 8-bit and GGUF Q8_0 differ by 5 MB, so they land in the same
+  place. Expect pressure.
 - **bf16 fits only below ~64 K**, and then with almost nothing left over.
 - At 32 K, every build fits. The choice only matters if you want long context.
+- **8-bit is comfortable to ~64 K** (5.50 GB) and only becomes marginal past it.
+  Combined with the KV-cache lever below, Q8_0 at 128 K comes back to ~5.5 GB.
 
 Two levers, and they are different on each runtime:
 
