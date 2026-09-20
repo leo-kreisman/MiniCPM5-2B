@@ -41,6 +41,8 @@ MiniCPM5-2B-MLX-8bit.safetensors.part-0:3c8104c76f9fe31aa43e248459873eb144728739
 MiniCPM5-2B-MLX-8bit.safetensors.part-1:d35b19e09668d7c75f16516c78d2aec547d29f7f3d044531f63bf5493ed4b0c6
 MiniCPM5-2B-MLX-4bit.safetensors:c207798696a4a454e7ac211b25227625466c693335941cee8904fb922f295cc1
 MiniCPM5-2B-Q4_K_M.gguf:ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd
+MiniCPM5-2B-Q8_0.gguf.part-0:464c5a5d62cf65d10e26948042906cd3a540fccaf7d5314b30d67a056c481cb4
+MiniCPM5-2B-Q8_0.gguf.part-1:d1e8e5302a2e6702f9dfe344f201e5cde060d39e4435f747f23f36b4974f2522
 "
 
 # target-path|sha256|asset names in concatenation order
@@ -49,6 +51,7 @@ bf16/model-00000-of-00001.safetensors|14fb8e7f0a18d53d1f239773758bf581cee7e456a4
 mlx-8bit/model.safetensors|82db8e423c5df99a5989f1b73dad1f44941a7800b308915f6ae7142966b32e40|MiniCPM5-2B-MLX-8bit.safetensors.part-0 MiniCPM5-2B-MLX-8bit.safetensors.part-1
 mlx-4bit/model.safetensors|c207798696a4a454e7ac211b25227625466c693335941cee8904fb922f295cc1|MiniCPM5-2B-MLX-4bit.safetensors
 gguf/MiniCPM5-2B-Q4_K_M.gguf|ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd|MiniCPM5-2B-Q4_K_M.gguf
+gguf/MiniCPM5-2B-Q8_0.gguf|c5415f8989bf88a8288f1b55a3cc371af53c07b0faa220a63bd7a990cfaba078|MiniCPM5-2B-Q8_0.gguf.part-0 MiniCPM5-2B-Q8_0.gguf.part-1
 "
 
 sha_of() {

@@ -23,7 +23,7 @@ documents do not contain (the memory arithmetic in §1, the OMP wiring in §2 an
 | MLX 4-bit | 1,416,035,216 | 4.50 | `openbmb` (official) | MLX | yes | no |
 | GGUF Q4_K_M | 1,561,318,368 | 4.96 | `openbmb` (official) | llama.cpp | yes | **yes** — wllama pin |
 | MLX 8-bit | 2,674,327,290 | 8.50 | `mlx-community` | MLX | yes | no |
-| GGUF Q8_0 | 2,679,710,688 | 8.52 | `openbmb` (official) | llama.cpp | **no** | no |
+| GGUF Q8_0 | 2,679,710,688 | 8.52 | `openbmb` (official) | llama.cpp | yes | no |
 
 Bytes/param is computed against **2,516,778,548 params** (bf16 ÷ 2), so it is the
 real precision of each container, not its label. Note `Q4_K_M` is ~4.96 bpw, not
@@ -34,17 +34,17 @@ All are official OpenBMB builds except the MLX 8-bit one, which is community. Th
 are the same weights in different containers — they do not share files and no
 runtime can read another's.
 
-**The mirror ships four of the six.** `GGUF Q8_0` and `GGUF F16` are published
-upstream in [`openbmb/MiniCPM5-2B-GGUF`](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF)
-and are **not** in `weights-v1` — download them straight from Hugging Face if you
-want them. Other quantizations (Q5_K_M, Q6_K, IQ4_XS …) exist in community repos
-such as `bartowski/MiniCPM5-2B-GGUF`.
+**The mirror ships five of the six.** `GGUF F16` is published upstream in
+[`openbmb/MiniCPM5-2B-GGUF`](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF) and
+is **not** in `weights-v1` — download it straight from Hugging Face if you want
+it. Other quantizations (Q5_K_M, Q6_K, IQ4_XS …) exist in community repos such as
+`bartowski/MiniCPM5-2B-GGUF`.
 
-**`GGUF Q8_0` is the one to notice.** It costs 1.12 GB over Q4_K_M and buys
-~8.52 bpw — and unlike the MLX 8-bit build, which is the *same precision at the
-same size*, it runs on `llama-server` and therefore **keeps the tool loop**
-(§2 fault 1). It is not true that 8-bit and tool calling are mutually exclusive
-on this model. See §1 for what it costs against the 9 GB budget.
+**`GGUF Q8_0` is the one to notice, and it is mirrored.** It costs 1.12 GB over
+Q4_K_M and buys ~8.52 bpw — and unlike the MLX 8-bit build, which is the *same
+precision at the same size*, it runs on `llama-server` and therefore **keeps the
+tool loop** (§2 fault 1). It is not true that 8-bit and tool calling are mutually
+exclusive on this model. See §1 for what it costs against the 9 GB budget.
 
 Get them with `./assemble.sh` (see §4). The bf16 and MLX 8-bit builds are over
 GitHub's 2 GiB per-file cap and ship as byte-range parts; the other two ship whole.
@@ -273,6 +273,14 @@ No Python, no virtualenv. The GGUF carries its own tokenizer and chat template.
 ```bash
 brew install llama.cpp          # vendor/LLAMA-CPP-INSTALL.md
 llama-server -m ./gguf/MiniCPM5-2B-Q4_K_M.gguf \
+  --port 8080 -ngl 99 -c 32768
+```
+
+Or the 8-bit build, which is the same size and precision as the MLX 8-bit one but
+keeps the tool loop:
+
+```bash
+llama-server -m ./gguf/MiniCPM5-2B-Q8_0.gguf \
   --port 8080 -ngl 99 -c 32768
 ```
 

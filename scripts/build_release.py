@@ -12,6 +12,7 @@ It produces, in PARTS (uploaded as release assets):
     MiniCPM5-2B-MLX-8bit.safetensors.part-{0,1}     2,674,327,290 B, split 2 ways
     MiniCPM5-2B-MLX-4bit.safetensors                1,416,035,216 B, under the cap
     MiniCPM5-2B-Q4_K_M.gguf                         1,561,318,368 B, under the cap
+    MiniCPM5-2B-Q8_0.gguf.part-{0,1}                2,679,710,688 B, split 2 ways
     MANIFEST.sha256                                 every asset + every rebuilt file
 
 and in the repository, one directory per build holding that build's config and
@@ -61,6 +62,8 @@ ASSETS = [
      "model.safetensors", 1, "mlx-4bit/model.safetensors"),
     ("MiniCPM5-2B-Q4_K_M", ".gguf", "openbmb/MiniCPM5-2B-GGUF",
      "MiniCPM5-2B-Q4_K_M.gguf", 1, "gguf/MiniCPM5-2B-Q4_K_M.gguf"),
+    ("MiniCPM5-2B-Q8_0", ".gguf", "openbmb/MiniCPM5-2B-GGUF",
+     "MiniCPM5-2B-Q8_0.gguf", 2, "gguf/MiniCPM5-2B-Q8_0.gguf"),
 ]
 
 # repository build directory -> source repo whose config/tokenizer it needs
