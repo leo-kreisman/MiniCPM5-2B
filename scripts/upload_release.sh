@@ -4,8 +4,9 @@
 #
 # There is no `gh` on this machine, so this drives the REST API directly. The
 # token comes from the configured git credential helper and is never echoed.
-# Re-running is safe: an asset already uploaded at the right size is skipped, so
-# an interrupted upload resumes instead of starting over.
+# Re-running is safe. See the two hazards documented at `upload_asset` -- one of
+# them silently ships a broken release, and this version exists because it was
+# hit for real.
 #
 # Usage:
 #   scripts/upload_release.sh --parts DIR [--tag weights-v1] [--dry-run]
@@ -22,6 +23,7 @@ NAME="${NAME:-MiniCPM5-2B builds: bf16, MLX 4-bit, MLX 8-bit, GGUF Q4_K_M}"
 BODY_FILE=""
 PARTS_DIR=""
 DRY_RUN=0
+ATTEMPTS=4
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -40,6 +42,13 @@ done
 API="https://api.github.com/repos/${REPO}"
 UPLOADS="https://uploads.github.com/repos/${REPO}"
 
+# Scratch space for response bodies. Deliberately NOT /tmp: on this machine /tmp
+# is on the 98 GB root partition while /home is 1.6 TB, and filling / took every
+# tool call down with it, including the ability to read back an error body.
+SCRATCH="${SCRATCH:-/home/scribe/tmp}"
+mkdir -p "$SCRATCH"
+[ -w "$SCRATCH" ] || { echo "scratch dir not writable: $SCRATCH" >&2; exit 1; }
+
 size_of() { wc -c < "$1" | tr -d ' '; }
 
 # ------------------------------------------------------------------ token
@@ -53,10 +62,28 @@ if [ "$DRY_RUN" -eq 0 ]; then
   [ -n "$TOKEN" ] || { echo "no GitHub token from credential helper" >&2; exit 1; }
 fi
 
+# ------------------------------------------------------------------ secrets
+# The token must never appear in this process's argv. `ps` shows every process's
+# argument list to every user on the machine, so `curl -H "Authorization: Bearer
+# $TOKEN"` publishes the credential to anyone who runs it -- and this was
+# observed for real: an unrelated `ps --ppid` while debugging dumped the token
+# straight out of the child curl's command line. curl reads its options from a
+# config file given with -K, and `-K -` reads that from stdin, which is not
+# visible in /proc. Every curl here goes through cf_curl, which does exactly
+# that. Do not "simplify" these back into -H flags.
+#
+# Usage: cf_curl [extra config lines on stdin] -- <curl args that are NOT secret>
+cf_curl() {
+  curl -sS --config - "$@"
+}
+
+# Authenticated GitHub API call. Any extra args are passed through to curl.
 api() {
-  curl -sS -H "Authorization: Bearer ${TOKEN}" \
-       -H "Accept: application/vnd.github+json" \
-       -H "X-GitHub-Api-Version: 2022-11-28" "$@"
+  cf_curl "$@" <<CFGEOF
+header = "Authorization: Bearer ${TOKEN}"
+header = "Accept: application/vnd.github+json"
+header = "X-GitHub-Api-Version: 2022-11-28"
+CFGEOF
 }
 
 # ------------------------------------------------------------------ release
@@ -107,6 +134,20 @@ print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[2],"body":sys.argv[3]})
   echo "    release id ${release_id}"
 fi
 
+# Print "<size> <state> <id>" for an asset by name, or "<none>".
+# `state` is the field that matters, and it is not optional detail -- see below.
+asset_info() {
+  api "${API}/releases/${release_id}/assets?per_page=100" | python3 -c '
+import json,sys
+want=sys.argv[1]
+for a in json.load(sys.stdin):
+    if a.get("name")==want:
+        print(a.get("size",0), a.get("state","?"), a.get("id",0)); break
+else:
+    print("none", "none", 0)
+' "$1"
+}
+
 # ------------------------------------------------------------------ upload
 upload_asset() {
   file="$1"
@@ -118,36 +159,84 @@ upload_asset() {
     return 0
   fi
 
-  have="$(api "${API}/releases/${release_id}/assets?per_page=100" \
-    | python3 -c '
-import json,sys
-name=sys.argv[1]
-for a in json.load(sys.stdin):
-    if a.get("name")==name:
-        print(a.get("size",0)); break
-' "$base")"
-  if [ "$have" = "$size" ]; then
+  read -r have state aid <<<"$(asset_info "$base")"
+
+  # HAZARD 1 -- size alone is not evidence the asset is good.
+  # GitHub creates the asset record when an upload BEGINS, and reports the full
+  # intended size for it while it is still incomplete (`state: starter`). A
+  # check of `size == local size` therefore treats an upload that died halfway
+  # as already done, skips it forever, and ships a release that looks complete
+  # but is missing a part. Observed for real: a dropped connection during
+  # part-1 left exactly this, at the correct reported size. Only `uploaded`
+  # means the bytes are actually there.
+  if [ "$state" = "uploaded" ] && [ "$have" = "$size" ]; then
     printf '    [skip]   %-48s already uploaded\n' "$base"
     return 0
   fi
 
-  printf '    [upload] %-48s %14s bytes\n' "$base" "$size"
-  # --upload-file streams from disk. Do NOT use --data-binary @file: curl buffers
-  # that form in memory, which fails outright on multi-GB parts.
-  code="$(curl -sS -o /tmp/gh_asset_resp.$$ -w '%{http_code}' \
-    -X POST "${UPLOADS}/releases/${release_id}/assets?name=${base}" \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -H "Content-Type: application/octet-stream" \
-    --upload-file "${file}")"
-
-  if [ "$code" != "201" ]; then
-    echo "    [FAIL]   ${base} -> HTTP ${code}" >&2
-    head -c 400 /tmp/gh_asset_resp.$$ >&2; echo >&2
-    rm -f /tmp/gh_asset_resp.$$
-    return 1
+  # HAZARD 2 -- a stale record blocks the re-upload by name.
+  # GitHub refuses a second asset with a name that already exists, so the
+  # incomplete placeholder has to be deleted first. Without this, every retry
+  # fails with 422 and the release can never be repaired.
+  if [ "$aid" != "0" ]; then
+    printf '    [stale]  %-48s state=%s size=%s -> deleting\n' "$base" "$state" "$have"
+    api -X DELETE "${API}/releases/assets/${aid}" >/dev/null \
+      || { echo "    [FAIL]   could not delete stale asset ${base}" >&2; return 1; }
   fi
-  rm -f /tmp/gh_asset_resp.$$
-  printf '    [ok]     %s\n' "$base"
+
+  attempt=1
+  while [ "$attempt" -le "$ATTEMPTS" ]; do
+    printf '    [upload] %-48s %14s bytes%s\n' "$base" "$size" \
+      "$([ "$attempt" -gt 1 ] && echo "  (attempt ${attempt}/${ATTEMPTS})")"
+
+    # --upload-file streams from disk. Do NOT use --data-binary @file: curl
+    # buffers that form in memory, which fails outright on multi-GB parts.
+    # HTTP 000 is a connection-level failure (DNS, reset, "Network is
+    # unreachable"), not a rejection, and it is worth retrying; a 4xx is not.
+    #
+    # Everything secret (the token) and everything long (the URL, the file path)
+    # goes through the stdin config, so the argv stays clean for `ps`. The
+    # scratch file lives on /home: /tmp is on the small root partition here, and
+    # the previous version of this script wrote there and then failed to read
+    # its own error body back when the filesystem filled.
+    respfile="$(mktemp "${SCRATCH}/gh_asset_resp.XXXXXX")"
+    code="$(cf_curl -o "${respfile}" -w '%{http_code}' <<CFGEOF || true
+url = "${UPLOADS}/releases/${release_id}/assets?name=${base}"
+request = "POST"
+header = "Authorization: Bearer ${TOKEN}"
+header = "Content-Type: application/octet-stream"
+upload-file = "${file}"
+CFGEOF
+)"
+
+    if [ "$code" = "201" ]; then
+      rm -f "${respfile}"
+      printf '    [ok]     %s\n' "$base"
+      return 0
+    fi
+
+    # A half-finished attempt leaves another placeholder behind, which must go
+    # before the next try for the same reason as above.
+    read -r _h2 _s2 aid2 <<<"$(asset_info "$base")"
+    if [ "$aid2" != "0" ]; then
+      api -X DELETE "${API}/releases/assets/${aid2}" >/dev/null || true
+    fi
+
+    echo "    [warn]   ${base} -> HTTP ${code}" >&2
+    [ -s "${respfile}" ] && head -c 300 "${respfile}" >&2 && echo >&2
+    rm -f "${respfile}"
+
+    case "$code" in
+      000|408|429|500|502|503|504) ;;   # transient: retry
+      *) echo "    [FAIL]   ${base}: HTTP ${code} is not retryable" >&2; return 1 ;;
+    esac
+
+    attempt=$((attempt + 1))
+    [ "$attempt" -le "$ATTEMPTS" ] && sleep $((attempt * 5))
+  done
+
+  echo "    [FAIL]   ${base} gave up after ${ATTEMPTS} attempts" >&2
+  return 1
 }
 
 echo "==> uploading from ${PARTS_DIR}"
@@ -168,5 +257,10 @@ if [ -f "${PARTS_DIR}/MANIFEST.sha256" ]; then
   upload_asset "${PARTS_DIR}/MANIFEST.sha256" || rc=1
 fi
 
-[ "$rc" -eq 0 ] && echo "==> done: https://github.com/${REPO}/releases/tag/${TAG}"
+if [ "$rc" -eq 0 ]; then
+  echo "==> done: https://github.com/${REPO}/releases/tag/${TAG}"
+else
+  echo "==> INCOMPLETE: some assets failed. Re-run this script; it repairs"
+  echo "    stale placeholders and skips only assets in state=uploaded."
+fi
 exit "$rc"

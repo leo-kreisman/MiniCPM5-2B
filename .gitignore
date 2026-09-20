@@ -5,3 +5,9 @@
 /mlx-8bit/*.safetensors
 /gguf/*.gguf
 /.parts/
+
+# Session handoff notes. Required by the global workflow, but this repo is a
+# public mirror, so they stay local -- they carry host details and dead ends that
+# have no business being published. Without this line a `git add -A` publishes
+# them; the equivalent file is already tracked by mistake in the Bonsai repo.
+/DEVELOPMENT_LOG.md
