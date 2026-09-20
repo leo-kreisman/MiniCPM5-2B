@@ -109,6 +109,92 @@ mlx_lm.server --model ./mlx-4bit --port 8080 \
 `--prefill-step-size` lowers *peak* memory while reading a long prompt, at some
 cost in prefill speed. The default is 2048.
 
+### ⚠️ Two server faults that look like a stupid model
+
+Run **both** checks before judging output quality. Each failure produces a symptom
+that reads as "this model is bad" when the fault is in the server, not the weights.
+
+#### 1. `mlx_lm.server` silently drops the chat template
+
+Every variant's `tokenizer_config.json` has **no `chat_template` key** — upstream
+ships the template as a standalone `chat_template.jinja` (9,060 bytes) beside the
+weights. `mlx_lm/server.py` branches on `tokenizer.has_chat_template`:
+
+```
+541  if tokenizer.has_chat_template:
+         prompt = tokenizer.apply_chat_template(..., tools=tools, ...)
+564  else:
+565      prompt = tokenizer.encode(convert_chat(messages, role_mapping))
+566      return prompt, [prompt], ["assistant"], "normal"
+```
+
+With no template the server **concatenates the messages as plain text** — no
+ChatML role markers, no assistant generation prompt — and that `return` skips the
+thinking/segment state machine entirely. MiniCPM5-2B is trained on ChatML, so a
+shapeless prompt yields shapeless output.
+
+**Assert — these three appear together, never singly:**
+- chain-of-thought leaks into the visible response instead of a thinking block;
+- tool calls come out as improvised markup with invented parameters, e.g.
+  `<function name="bash"><param name="command">…</param><param name="i">…</param></function>`
+  — that `name="i"` is hallucinated, because `tools=` never reached a template;
+- the model rambles about its own capabilities.
+
+**Check** (substitute the absolute path to `mlx-4bit` or `mlx-8bit`):
+
+```bash
+python3 -c "
+from transformers import AutoTokenizer
+t = AutoTokenizer.from_pretrained('/abs/path/to/mlx-8bit')
+print('class            :', type(t).__name__)
+print('chat_template    :', repr(t.chat_template)[:200])
+print('has_tool_calling :', getattr(t, 'has_tool_calling', 'n/a'))"
+```
+
+**Expected:** a long template string. **Failure:** `None`.
+
+**Fix** — inline the jinja already sitting in that directory:
+
+```bash
+python3 - <<'EOF'
+import json, pathlib
+d = pathlib.Path('/abs/path/to/mlx-8bit')
+tpl = (d/'chat_template.jinja').read_text()
+cfg = json.loads((d/'tokenizer_config.json').read_text())
+cfg['chat_template'] = tpl
+(d/'tokenizer_config.json').write_text(json.dumps(cfg, indent=2))
+print('inlined', len(tpl), 'bytes')
+EOF
+```
+
+The tokenizer is read once at startup, so **restart the server**, then re-run the
+check.
+
+**Do not reach for `--use-default-chat-template`.** `server.py:352` substitutes
+`tokenizer.default_chat_template` — the generic Llama template. A wrong template is
+worse than none. Fix the file.
+
+#### 2. `GET /v1/models` returns 500 without a Hugging Face cache
+
+`handle_models_request` calls `scan_cache_dir()` unguarded (`server.py:1690`;
+`huggingface_hub` raises `CacheNotFound` at `utils/_cache_manager.py:777`). On a
+machine that has never had an HF cache this endpoint 500s, and any client that
+probes it for readiness — **OMP does** — hangs on "starting" indefinitely.
+
+```bash
+mkdir -p "$(python3 -c 'from huggingface_hub import constants as c; print(c.HF_HUB_CACHE)')"
+```
+
+`scan_cache_dir()` reads **`HF_HUB_CACHE`**, which derives from `HF_HOME` — *not*
+`~/.cache/huggingface/hub`. If `HF_HOME` is exported, `mkdir -p
+~/.cache/huggingface/hub` is a silent no-op. Ask the library for the path, above.
+
+This is the same endpoint the OMP `id` check below uses. If that `curl` hangs or
+500s, this is why.
+
+**Route B is immune to both faults.** `llama-server` reads its template from GGUF
+metadata and has no Hugging Face dependency at all.
+
 ### Wiring it into OMP
 
 OMP is a coding agent, not an inference runtime — it talks to a server over
@@ -263,6 +349,14 @@ Each of these is a wrong conclusion this setup reliably produces.
    reassembled weights.
 6. **"`mlx_lm.server` needs a `/v1` in `--model`."** It does not, and OMP's
    `baseUrl` does. Those are two different places.
+7. **"This 2B model is just bad at tool calling."** Check the template first —
+   §2. `mlx_lm.server` silently drops it when `tokenizer.has_chat_template` is
+   false, and the symptom triad (leaked reasoning, invented `<param name="i">`,
+   rambling about its own abilities) is that fault, not a capability ceiling. Fix
+   the format before you judge the model.
+8. **"I ran `mkdir ~/.cache/huggingface/hub` and `/v1/models` still 500s."** It
+   reads `HF_HUB_CACHE`, which follows `HF_HOME`. If `HF_HOME` is exported, that
+   mkdir is a no-op. Create the path the library actually reports — §2.
 
 ---
 
@@ -271,6 +365,8 @@ Each of these is a wrong conclusion this setup reliably produces.
 | Claim in this guide | Source |
 | --- | --- |
 | MLX-LM install, `--max-kv-size`, `--prefill-step-size`, `mlx_lm.server` | `vendor/MLX-LM-README.md` |
+| The `has_chat_template` fallback (§2 fault 1) | `mlx-lm` `mlx_lm/server.py` `main` — lines 541/564–566, 352 |
+| The unguarded `scan_cache_dir()` (§2 fault 2) | `mlx-lm` `mlx_lm/server.py:1690`; `huggingface_hub` `utils/_cache_manager.py:777` |
 | SemIf install, MLX-LM commit pin, 0.31.3 L2-epsilon bug, `--mlx-bits`, cache cap | `vendor/SEMIF-MLX.md` |
 | The `model_type not in {"qwen3_5"}` refusal | SemIf `src/semif_phase1/mlx_backend.py` @ `ca3ba65` |
 | Which revisions SemIf pins | `vendor/SEMIF-MODELS.json` |
