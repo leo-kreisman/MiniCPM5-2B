@@ -114,65 +114,65 @@ cost in prefill speed. The default is 2048.
 Run **both** checks before judging output quality. Each failure produces a symptom
 that reads as "this model is bad" when the fault is in the server, not the weights.
 
-#### 1. `mlx_lm.server` silently drops the chat template
+#### 1. `mlx_lm` cannot parse MiniCPM's tool calls or thinking blocks
 
-Every variant's `tokenizer_config.json` has **no `chat_template` key** — upstream
-ships the template as a standalone `chat_template.jinja` (9,060 bytes) beside the
-weights. `mlx_lm/server.py` branches on `tokenizer.has_chat_template`:
+**Evidence, from a real run** with the model loaded and a tool-using client:
 
 ```
-541  if tokenizer.has_chat_template:
-         prompt = tokenizer.apply_chat_template(..., tools=tools, ...)
-564  else:
-565      prompt = tokenizer.encode(convert_chat(messages, role_mapping))
-566      return prompt, [prompt], ["assistant"], "normal"
+00:37:35,055 - WARNING - Received tools but model does not support tool calling.
 ```
 
-With no template the server **concatenates the messages as plain text** — no
-ChatML role markers, no assistant generation prompt — and that `return` skips the
-thinking/segment state machine entirely. MiniCPM5-2B is trained on ChatML, so a
-shapeless prompt yields shapeless output.
+That warning lives *inside* the `if tokenizer.has_chat_template:` branch
+(`server.py:543`) — so it also proves the **chat template IS loading** and
+`has_chat_template` is **True**. The template is not the problem, and neither is
+`tokenizer_config.json`'s missing `chat_template` key: `mlx_lm` resolves the
+standalone `chat_template.jinja` correctly.
 
-**Assert — these three appear together, never singly:**
-- chain-of-thought leaks into the visible response instead of a thinking block;
-- tool calls come out as improvised markup with invented parameters, e.g.
-  `<function name="bash"><param name="command">…</param><param name="i">…</param></function>`
-  — that `name="i"` is hallucinated, because `tools=` never reached a template;
-- the model rambles about its own capabilities.
+The real cause is that `mlx_lm` identifies a model's tool format by
+**string-matching the chat template** (`tokenizer_utils.py:619
+_infer_tool_parser`). Its entire registry:
 
-**Check** (substitute the absolute path to `mlx-4bit` or `mlx-8bit`):
-
-```bash
-python3 -c "
-from transformers import AutoTokenizer
-t = AutoTokenizer.from_pretrained('/abs/path/to/mlx-8bit')
-print('class            :', type(t).__name__)
-print('chat_template    :', repr(t.chat_template)[:200])
-print('has_tool_calling :', getattr(t, 'has_tool_calling', 'n/a'))"
+```
+"<minimax:tool_call>"                     -> minimax_m2
+"<|tool_call>" + "<tool_call|>"           -> gemma4
+"<start_function_call>"                   -> function_gemma
+"<longcat_tool_call>"                     -> longcat
+"<arg_key>"                               -> glm47
+"<|tool_list_start|>" / "<|tool_call_start|>" -> pythonic
+"<tool_call>\n<function="                 -> qwen3_coder
+"<|tool_calls_section_begin|>"            -> kimi_k2
+"[TOOL_CALLS]"                            -> mistral
+"<tool_call>" + "tool_call.name"          -> json_tools
+                                          -> else: return None
 ```
 
-**Expected:** a long template string. **Failure:** `None`.
+MiniCPM5-2B emits `<function name="bash">…<param name="command">…`. **Nothing in
+that list matches** — note `qwen3_coder` needs a literal `<tool_call>` wrapper and
+`<function=` with no space, neither of which MiniCPM produces. So
+`_infer_tool_parser` returns `None`, `tool_parser` is `None`, and
+`has_tool_calling` is False (`tokenizer_utils.py:484`). `mlx_lm/tool_parsers/`
+ships thirteen parsers — `function_gemma`, `gemma4`, `glm47`, `json_tools`,
+`kimi_k2`, `kimi_k3`, `laguna`, `longcat`, `minimax_m2`, `mistral`, `pythonic`,
+`qwen3_coder` — and **`grep -i minicpm` across `mlx_lm` returns zero hits.**
 
-**Fix** — inline the jinja already sitting in that directory:
+**Assert:**
+- tool calls arrive as **raw text** in the message body instead of structured
+  `tool_calls` — you see the literal `<function name=…><param name=…>` markup
+  printed as content;
+- reasoning leaks into the visible response instead of a thinking block
+  (`has_thinking`, `tokenizer_utils.py:448`, is likewise False);
+- the model appears to ramble about its own capabilities.
 
-```bash
-python3 - <<'EOF'
-import json, pathlib
-d = pathlib.Path('/abs/path/to/mlx-8bit')
-tpl = (d/'chat_template.jinja').read_text()
-cfg = json.loads((d/'tokenizer_config.json').read_text())
-cfg['chat_template'] = tpl
-(d/'tokenizer_config.json').write_text(json.dumps(cfg, indent=2))
-print('inlined', len(tpl), 'bytes')
-EOF
-```
+**Do not try to fix this by editing `tokenizer_config.json`.** You *can* force the
+parser — `tokenizer_utils.py:709` reads a `tool_parser_type` key and imports
+`mlx_lm.tool_parsers.<type>` — but **no shipped parser matches MiniCPM's syntax**,
+so you would silently mis-parse tool calls into the wrong shape, which is worse
+than leaving them as text. There is no supported route to tool calling for this
+model on `mlx_lm.server`, and it is not a bug you can configure around.
 
-The tokenizer is read once at startup, so **restart the server**, then re-run the
-check.
-
-**Do not reach for `--use-default-chat-template`.** `server.py:352` substitutes
-`tokenizer.default_chat_template` — the generic Llama template. A wrong template is
-worse than none. Fix the file.
+**Use Route B (§3).** `llama-server` applies the template from GGUF metadata and
+runs its own tool-call handling, so it is not limited to mlx_lm's parser registry.
+For an agent harness this is the difference between a working tool loop and none.
 
 #### 2. `GET /v1/models` returns 500 without a Hugging Face cache
 
@@ -192,8 +192,22 @@ mkdir -p "$(python3 -c 'from huggingface_hub import constants as c; print(c.HF_H
 This is the same endpoint the OMP `id` check below uses. If that `curl` hangs or
 500s, this is why.
 
-**Route B is immune to both faults.** `llama-server` reads its template from GGUF
-metadata and has no Hugging Face dependency at all.
+**Known-good workaround, confirmed in practice:** start the server with offline
+mode on and the endpoint stops failing, with no `mkdir` needed:
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 mlx_lm.server --model ./mlx-8bit --port 7777
+```
+
+This was observed to work on 2026-09-20 (macOS, Homebrew Python 3.14, mlx-lm
+current). **The mechanism is not established** — `scan_cache_dir()` is documented
+to raise `CacheNotFound` on a missing directory whether or not offline mode is set,
+so offline mode is doing something indirect here. Treat it as an empirical
+workaround, not an explanation, and keep the `mkdir` form above as the documented
+one. Offline mode is worth setting regardless for a local-only server.
+
+**Route B sidesteps this entirely** — `llama-server` has no Hugging Face dependency
+at all. It is also the only route with usable tool calling (§2 fault 1).
 
 ### Wiring it into OMP
 
@@ -349,11 +363,12 @@ Each of these is a wrong conclusion this setup reliably produces.
    reassembled weights.
 6. **"`mlx_lm.server` needs a `/v1` in `--model`."** It does not, and OMP's
    `baseUrl` does. Those are two different places.
-7. **"This 2B model is just bad at tool calling."** Check the template first —
-   §2. `mlx_lm.server` silently drops it when `tokenizer.has_chat_template` is
-   false, and the symptom triad (leaked reasoning, invented `<param name="i">`,
-   rambling about its own abilities) is that fault, not a capability ceiling. Fix
-   the format before you judge the model.
+7. **"This 2B model is just bad at tool calling."** Partly a capability ceiling,
+   but the *reason* you see raw `<function name=…>` markup is §2 fault 1:
+   `mlx_lm` has no tool parser matching MiniCPM's syntax, so tool calls reach the
+   client as text no matter how well the model emits them. The chat template is
+   fine and is not the cause — do not go editing `tokenizer_config.json`. If you
+   need a real tool loop, use Route B.
 8. **"I ran `mkdir ~/.cache/huggingface/hub` and `/v1/models` still 500s."** It
    reads `HF_HUB_CACHE`, which follows `HF_HOME`. If `HF_HOME` is exported, that
    mkdir is a no-op. Create the path the library actually reports — §2.
@@ -365,8 +380,9 @@ Each of these is a wrong conclusion this setup reliably produces.
 | Claim in this guide | Source |
 | --- | --- |
 | MLX-LM install, `--max-kv-size`, `--prefill-step-size`, `mlx_lm.server` | `vendor/MLX-LM-README.md` |
-| The `has_chat_template` fallback (§2 fault 1) | `mlx-lm` `mlx_lm/server.py` `main` — lines 541/564–566, 352 |
+| Tool-parser registry, `has_tool_calling`, `has_thinking` (§2 fault 1) | `mlx-lm` `mlx_lm/tokenizer_utils.py:619` (`_infer_tool_parser`), `:448`, `:484`; `mlx_lm/tool_parsers/` |
 | The unguarded `scan_cache_dir()` (§2 fault 2) | `mlx-lm` `mlx_lm/server.py:1690`; `huggingface_hub` `utils/_cache_manager.py:777` |
+| The `HF_HUB_OFFLINE=1` workaround (§2 fault 2) | **empirical** — observed 2026-09-20; mechanism *not* established |
 | SemIf install, MLX-LM commit pin, 0.31.3 L2-epsilon bug, `--mlx-bits`, cache cap | `vendor/SEMIF-MLX.md` |
 | The `model_type not in {"qwen3_5"}` refusal | SemIf `src/semif_phase1/mlx_backend.py` @ `ca3ba65` |
 | Which revisions SemIf pins | `vendor/SEMIF-MODELS.json` |
